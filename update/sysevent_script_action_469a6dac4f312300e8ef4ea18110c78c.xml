@@ -1,0 +1,458 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update sys_domain="global" table="sysevent_script_action">
+    <sysevent_script_action action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <condition_script/>
+        <description/>
+        <event_name>x_111982_slack_int.itom.slack.getdata</event_name>
+        <name>ITOM Slack Get Data</name>
+        <order>100</order>
+        <script><![CDATA[// Execute a retrieval of alert data and send to a Slack channel.
+// Parm1 will contain the queryParams object sent from Slack.
+// Attributes in the object of interest are:
+//            text
+//            response_url
+//            user_id
+//            action - this is created by me to track which type of action was requested
+
+getAlertData();
+
+function getAlertData() {
+	try{
+		var parser = new JSONParser();
+		var parsed = parser.parse(event.parm1);
+		
+		var cmdParams = parsed.text;
+		var action = parsed.action;
+		
+		// initialize variables used throughout the rest of the API
+		var parm0Array = [];
+		var respType = '';
+		var respMsg = '';
+		var attMsg = '';
+		
+		var title = '';
+		var titlelink = '';
+		var fields = [];
+		var actions = [];
+		var text = '';
+		var callback_id = '';
+		var replaceOrg = true;
+		
+		//gs.log('---> cmdParams in script action: ' + cmdParams, 'Slack ITOM Data');
+		//gs.log('---> action in getdata: ' + action, 'Slack ITOM Data');
+		
+		// validate parameter existence and format
+		if ((cmdParams != 'listopen') && (cmdParams != 'help') && (action != 'show_impact')) {
+			var re0 = new RegExp('^(alert:).*$', 'j');
+			parm0Array = re0.exec(cmdParams);
+		}
+		
+		if ((parm0Array[1] != 'alert:') && (cmdParams != 'listopen') && (action != 'show_impact')){
+			respMsg = "Help for /datanow slash command\n";
+			attMsg = showHelp();
+			text = attMsg.text;
+			respType = 'ephemeral';
+		}
+		else {
+			if (cmdParams == 'listopen'){
+				respMsg = '<@' + parsed.user_id + '> requested a list of open, critical alerts:\n';
+				attMsg = getOpenAlerts(parsed.user_id);
+				text = attMsg.text;
+				respType = 'in_channel';
+			} else if (action == 'show_impact') {
+				respMsg = '<@' + parsed.user_id + '> requested impact details:\n';
+				attMsg = showImpact(cmdParams);
+				title = attMsg.title;
+				text = attMsg.text;
+				respType = 'in_channel';
+				replaceOrg = false;
+			} else {
+				respMsg = '<@' + parsed.user_id + '> requested these details:\n';
+				attMsg = getAlertDetails(cmdParams);
+				title = attMsg.title;
+				titlelink = attMsg.titlelink;
+				fields = attMsg.fields;
+				actions = attMsg.actions;
+				text = attMsg.text;
+				callback_id = attMsg.callback_id;
+				respType = 'in_channel';
+			}
+		}
+		
+		var payload = {};
+		
+		payload = {
+				"response_type": respType,
+				"replace_original": replaceOrg,
+				"attachments": [
+					 {
+						"fallback": "ITOM Alert.",
+						"callback_id": callback_id,
+						"color": "#36a64f",
+						"pretext": respMsg, 
+						"title": title,
+						"title_link": titlelink,
+						"fields": fields,
+						"actions": actions,
+						"text": text
+					 }
+				]
+		};
+		
+		var slackResponse = new sn_ws.RESTMessageV2();
+		slackResponse.setEndpoint(parsed.response_url);
+		slackResponse.setHttpMethod('POST');
+		slackResponse.setRequestBody(JSON.stringify(payload));
+		slackResponse.setRequestHeader('Content-type','application/json');
+		var slackOutput = slackResponse.execute();
+		var status = slackOutput.getStatusCode();
+	}
+	catch (e) {
+		gs.log('---> Slack Integration error in getAlertData: ' + e, 'Slack ITOM Data');
+	}
+}
+
+/*
+ * This function will return a list of alerts that are open and have a critical severity
+ */
+function getOpenAlerts(userID){
+
+	var listStr = {};
+	
+	try{
+		var thisInstanceName = gs.getProperty("instance_name");
+		var alertLink = 'https://' + thisInstanceName + '.service-now.com/em_alert.do?sys_id=';
+		var link2alert = '';
+		var listGr = new GlideRecord('em_alert');
+		listGr.orderBy('number');
+		listGr.addQuery('state', 'IN',['Open','Reopen']);
+		listGr.addQuery('severity', 1); // Critical
+		listGr.query();
+	
+		listStr.text = '';
+	
+		var alertsFound = false;
+		while(listGr.next()){
+			// create embedded link field for alert
+			link2alert = alertLink + listGr.sys_id;
+			listStr.text = listStr.text +
+						'Alert: ' + '<' + link2alert + '|' + listGr.number + '>' +
+						' || CI: ' + (listGr.cmdb_ci.name == '' ? 'No CI on this Alert' : listGr.cmdb_ci.name) +
+						' || Description: ' + listGr.description + '\n';
+			alertsFound = true;
+		}
+		if (!alertsFound){
+			listStr = listStr + 'No critical alerts currently open.\n';
+		}
+	}
+	catch(e){
+		gs.log('---> Slack Integration error in getOpenAlerts: ' + e, 'Slack ITOM Data');
+	}
+	return listStr;
+}
+
+/*
+ * This function will return details for a single alert specified by the requestor
+ */
+function getAlertDetails(parms){
+	var alertDetails = {};
+	
+	try{
+		var thisInstanceName = gs.getProperty("instance_name");
+		var alertLink = 'https://' + thisInstanceName + '.service-now.com/em_alert.do?sys_id=';
+		var incidentLink = 'https://' + thisInstanceName + '.service-now.com/incident.do?sys_id=';
+		var link2alert = '';
+		var link2incident = '';
+	
+		// parse command parameter... setup Regular Expressions to pull out the data
+		var re = new RegExp('(?<=alert:).*', 'j');
+		var parmArray = re.exec(parms);
+	
+		var parmRecord = parmArray[0];
+	
+		var alGr = new GlideRecord('em_alert');
+		alGr.addQuery('number', parmRecord);
+		alGr.query();
+		if(alGr.next()){
+			// build list of remediation tasks if they exist for alert
+			var remStr = getRemediationTask4Alert(alGr.sys_id);
+			if (remStr == ''){
+				remStr = "No remediations executed\n";
+			}
+			
+			var ciName = 'No CI on Alert';
+			if(alGr.cmdb_ci) {
+				ciName = alGr.cmdb_ci.name+'';
+			}
+		
+			link2alert = alertLink + alGr.sys_id;
+			link2incident = incidentLink + alGr.incident;
+		
+			alertDetails.title = alGr.number+'';
+			alertDetails.titlelink = link2alert+'';
+			alertDetails.callback_id = 'alert_action';
+		
+			// build output to post in channel
+		
+			alertDetails.fields =  [{"title":"Description", "value":alGr.description+'', "short": false },
+									{"title":"State", "value":alGr.state+'', "short": true },
+									{"title":"CI", "value":ciName, "short": true },
+									{"title":"Acknowledged", "value":alGr.acknowledged+'', "short": true }
+									];
+			if(alGr.incident){
+				alertDetails.fields.push({"title":"Incident", "value":"<"+link2incident+"|"+alGr.incident.number+">", "short": true });
+			}
+			if(alGr.sn_services > 0){
+				alertDetails.fields.push({"title":"# Impacted Services", "value":alGr.sn_services+'', "short": true });
+			}
+		
+			alertDetails.fields.push({"title":"Remediations", "value":remStr, "short": false });
+		
+			// build actions based on alert details
+			
+			alertDetails.actions = buildActions(alGr.sys_id);
+	
+		} else {
+			alertDetails.text = 'No record found for: ' + parmRecord + '\n';
+		}
+	}
+		catch(e){
+		gs.log('---> Slack Integration error in getAlertDetails: ' + e, 'Slack ITOM Data');
+	}
+	return alertDetails;
+}
+
+/*
+ * This function will create a string of remediation task details should any exist
+ *    for the alert sys_id passed to the function.  This should be used in a
+ *    request for alert details (one alert at a time)
+ */
+function getRemediationTask4Alert(alertID){
+	var remTaskStr = '';
+	
+	try {
+		var stateStr = '';
+		var thisInstanceName = gs.getProperty("instance_name");
+		var taskLink = 'https://' + thisInstanceName + '.service-now.com/em_remediation_task.do?sys_id=';
+		var link2task = '';
+	
+		var emrGr = new GlideRecord('em_remediation_task');
+		emrGr.addQuery('alert', alertID);
+		emrGr.query();
+		
+		while (emrGr.next()){
+			link2task = taskLink + emrGr.sys_id;
+			stateStr = getStateDisplay(emrGr.state);
+			remTaskStr = remTaskStr +
+						'Task: ' + '<' + link2task + '|' + emrGr.number + '>' +
+						'; Workflow: ' + emrGr.remediation_workflow.name +
+						'; State: ' + stateStr + '\n';
+		}
+	} 
+	catch (e){
+		gs.log('---> Slack Integration error in getRemediationTask4Alert: ' + e, 'Slack ITOM Data');
+	}
+	return remTaskStr;
+}
+
+/*
+ * Build the proper actions based on alert details and CI orchestrations
+ */
+function buildActions(alertID){
+
+	var actions = [];
+
+	try {
+		var option_list = [];
+		var alGr = new GlideRecord('em_alert');
+		alGr.addQuery('sys_id', alertID);
+		alGr.query();
+		if (alGr.next()){
+			// Only show remediation options if the alert has a CI
+			if(alGr.cmdb_ci){
+				option_list = getCIoptions(alGr.cmdb_ci.sys_class_name);
+				// gs.log('---> Slack Integration: Option List: ' + JSON.stringify(option_list), 'Slack ITOM Data');
+				actions.push(
+						{
+							"name": "remediation_list",
+							"text": "Remediation options",
+							"type": "select",
+							"options": option_list
+						});
+			}
+			// Only show the "Show Impact" button if the alert has impacted services
+			if(alGr.sn_services > 0){
+				actions.push(
+						{
+							"name": "getdata",
+							"text": "Show Impact",
+							"type": "button",
+							"value": "show_impact"
+						});
+			}
+			if(!alGr.incident){
+				actions.push(
+						{
+							"name": "getdata",
+							"text": "Create Incident",
+							"type": "button",
+							"value": "create_inc"
+						});
+			}
+		}
+	}
+	catch(e){
+		gs.log('---> Slack Integration error in buildActions: ' + e, 'Slack ITOM Data');
+	}
+	return actions;
+}
+
+/*
+ * This function requests the user friendly format of the state field.  It is
+ *    intended to be used within the remediation task function
+ */
+function getCIoptions(ciClass){
+	// Default the return value if none found
+	var ciOptions = [];
+	
+	try{
+		// Query for valid CI Remediation options based on the CI class
+		//  This requires the customer would have created these records
+		//  with this filtering mechanism in place
+		var qFilter = 'sys_class_nameINSTANCEOF'+ciClass+'^EQ';
+		//gs.log('---> Slack Integration: Filter: ' + qFilter, 'Slack ITOM Data');
+		var optionGr = new GlideRecord('em_ci_remediation');
+		optionGr.addQuery('ci_filter', qFilter);
+		optionGr.query();
+		var option = {};
+		while(optionGr.next()){
+			option = {"text":optionGr.name+'',"value":optionGr.workflow+''};
+			//gs.log('---> Slack Integration: Option name: ' + JSON.stringify(option), 'Slack ITOM Data');
+			ciOptions.push(option);
+		}
+	}
+	catch(e){
+		gs.log('---> Slack Integration error in getCIoptions: ' + e, 'Slack ITOM Data');
+	}
+	return ciOptions;
+}
+
+/*
+ * This function requests the user friendly format of the state field.  It is
+ *    intended to be used within the remediation task function
+ */
+function getStateDisplay(stateCode){
+	// Default the return value if none found
+	var stateDisplay = 'Unknown';
+	
+	try{
+		var choiceGr = new GlideRecord('sys_choice');
+		choiceGr.addQuery('table', 'task');
+		choiceGr.addQuery('element', 'state');
+		choiceGr.addQuery('value', stateCode);
+		choiceGr.query();
+		if(choiceGr.next()){
+			stateDisplay = choiceGr.label;
+		}
+	}
+	catch(e){
+		gs.log('---> Slack Integration error in getStateDisplay: ' + e, 'Slack ITOM Data');
+	}
+	return stateDisplay;
+}
+
+/*
+ * This function lists all the "services" a CI is part of 
+ */
+function showImpact(parms){
+	var impactedServices = [];
+	var serviceList = {};
+	serviceList.text = '';
+	
+	try{
+		// parse command parameter... setup Regular Expressions to pull out the data
+		var re = new RegExp('(?<=alert:).*', 'j');
+		var parmArray = re.exec(parms);
+		var parmRecord = parmArray[0];
+	
+		var alertGr = new GlideRecord('em_alert');
+		alertGr.addQuery('number', parmRecord);
+		alertGr.query();
+	
+		if (alertGr.next()){
+			serviceList.title = parmRecord + ' / ' + alertGr.cmdb_ci.name;
+			var ciSysId = alertGr.cmdb_ci;
+			var legacyServices = getLegacyServicesForCi(ciSysId);
+			var modernServices = getModernServicesForCi(ciSysId);
+			var combinedServices = new ArrayUtil().union(legacyServices, modernServices);
+			impactedServices = new ArrayUtil().union(impactedServices, combinedServices);
+			var svc = '';
+			for (var i = 0; i < impactedServices.length; i++) {		
+			   svc = new GlideRecord('cmdb_ci_service');
+			   svc.addQuery('sys_id', impactedServices[i]);
+			   svc.query();
+			   if(svc.next()){
+				  serviceList.text = serviceList.text + svc.name + '\n';
+			   }
+			}
+		}
+		if (serviceList.text == ''){
+			serviceList.text = 'CI on Alert is not part of any defined business services.';
+		}
+	}
+	catch(e){
+		gs.log('---> Slack Integration error in showImpact: ' + e, 'Slack ITOM Data');
+	}
+	return serviceList;
+}
+
+// sub-function for showImpact function
+function getLegacyServicesForCi(ciSysId) {
+	return new CIUtils().servicesAffectedByCI(ciSysId);
+}
+	
+// sub-function for showImpact function
+function getModernServicesForCi(ciSysId) {
+	var modernServices = [];
+	var serviceCiAssocGr = new GlideRecord('svc_ci_assoc');
+	serviceCiAssocGr.addQuery('ci_id', ciSysId);
+	serviceCiAssocGr.query();
+	while(serviceCiAssocGr.next()){
+		modernServices.push(serviceCiAssocGr.service_id.sys_id + '');
+	}
+	return modernServices;
+}
+
+/*
+ * This function builds a string showing proper usage of the /datanow slash
+ *    command that would initiate a call to these functions
+ */
+function showHelp(){
+	var helpText = {};
+	helpText.text = 'Valid options for this command are:\n' +
+	'/datanow alert:<alert>\n' +
+	'/datanow listopen\n' +
+	'/datanow help\n';
+	return helpText;
+}]]></script>
+        <synchronous>false</synchronous>
+        <sys_class_name>sysevent_script_action</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2018-11-12 15:29:16</sys_created_on>
+        <sys_customer_update>false</sys_customer_update>
+        <sys_domain>global</sys_domain>
+        <sys_domain_path>/</sys_domain_path>
+        <sys_id>469a6dac4f312300e8ef4ea18110c78c</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>ITOM Slack Get Data</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="Slack Integration - ITOM APIs" source="x_111982_slack_int">c26529a04f312300e8ef4ea18110c725</sys_package>
+        <sys_policy/>
+        <sys_replace_on_upgrade>false</sys_replace_on_upgrade>
+        <sys_scope display_value="Slack Integration - ITOM APIs">c26529a04f312300e8ef4ea18110c725</sys_scope>
+        <sys_update_name>sysevent_script_action_469a6dac4f312300e8ef4ea18110c78c</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2018-11-12 15:29:16</sys_updated_on>
+    </sysevent_script_action>
+</record_update>

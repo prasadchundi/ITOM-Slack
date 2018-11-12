@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update table="sys_ws_operation">
+    <sys_ws_operation action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <consumes>application/x-www-form-urlencoded</consumes>
+        <consumes_customized>true</consumes_customized>
+        <default_operation_uri/>
+        <enforce_acl>cf9d01d3e73003009d6247e603f6a990</enforce_acl>
+        <http_method>POST</http_method>
+        <name>ITOM Remediation</name>
+        <operation_script><![CDATA[(function process(/*RESTAPIRequest*/ request, /*RESTAPIResponse*/ response) {
+	
+	/* Slack places the request in the queryParams value, so reference those
+	
+		Example queryParams from Slack
+	
+		{"channel_name":["privategroup"],
+		"user_id":["UAYT34389"],
+		"user_name":["nickryan"],
+		"trigger_id":["421263749766.374513231111.1208ee923e082d6ef8103828187e0d97"],
+		"team_domain":["yourworkspace"],
+		"team_id":["TB0F36T39"],
+		"text":["action:restart alert:alert123"],
+		"api":["api"],
+		"channel_id":["GC991F2L8"],
+		"command":["/actnow"],
+		"token":["slack application auth token"],
+		"response_url":["https://hooks.slack.com/commands/TB0F36T39/419925971474/Qw9tQ64rtTcceukNglefwKXs"]}
+	*/
+	
+	// Always send back a successfully 200 response and handle error notifications in message
+	response.setStatus(200);
+	
+	// Validate the Slack app token
+	var authtoken = gs.getProperty("x_111982_slack_int.itom.slack.app.token01");
+	if(request.queryParams.token != authtoken) {
+		response.setBody('Unauthorized Request');
+		return;
+	}
+	
+	try {
+		var respText = "Your " + request.queryParams.command + " " + 
+						request.queryParams.text + " request has been received... processing";
+		// Format an initial response
+		var payload = {
+			"response_type": "ephemeral",
+			"text": respText
+		};
+		
+		gs.log('---> About to take action', 'Slack ITOM Action');
+		
+		// Get the requests query parameters and create an event to process the request async
+		
+		var parms = JSON.stringify(request.queryParams);
+		gs.eventQueue("x_111982_slack_int.itom.slack.action", current, parms);
+		
+		// Send ephemeral response back to Slack to notify user command is processing
+		
+		var slackResponse = new sn_ws.RESTMessageV2();
+		slackResponse.setEndpoint(request.queryParams.response_url);
+		slackResponse.setHttpMethod('POST');
+		slackResponse.setRequestBody(JSON.stringify(payload));
+		slackResponse.setRequestHeader('Content-type','application/json');
+		var slackOutput = slackResponse.execute();
+		
+		return;
+	}
+	catch (e){
+		gs.log('---> Slack Integration error: ' + e, 'Slack ITOM Action');
+		response.setBody('Error in processing: ' + e);
+		return;
+	}
+
+})(request, response);]]></operation_script>
+        <operation_uri>/api/x_111982_slack_int/itom_slack_run_remediation</operation_uri>
+        <produces>application/json</produces>
+        <produces_customized>true</produces_customized>
+        <relative_path>/</relative_path>
+        <request_example/>
+        <requires_acl_authorization>true</requires_acl_authorization>
+        <requires_authentication>false</requires_authentication>
+        <short_description/>
+        <sys_class_name>sys_ws_operation</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2018-11-12 15:12:04</sys_created_on>
+        <sys_customer_update>false</sys_customer_update>
+        <sys_id>64562de84f312300e8ef4ea18110c7f5</sys_id>
+        <sys_mod_count>3</sys_mod_count>
+        <sys_name>ITOM Remediation</sys_name>
+        <sys_package display_value="Slack Integration - ITOM APIs" source="x_111982_slack_int">c26529a04f312300e8ef4ea18110c725</sys_package>
+        <sys_policy/>
+        <sys_replace_on_upgrade>false</sys_replace_on_upgrade>
+        <sys_scope display_value="Slack Integration - ITOM APIs">c26529a04f312300e8ef4ea18110c725</sys_scope>
+        <sys_update_name>sys_ws_operation_64562de84f312300e8ef4ea18110c7f5</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2018-11-12 15:19:55</sys_updated_on>
+        <web_service_definition display_value="ITOM Slack - Run Remediation">70f5a9a84f312300e8ef4ea18110c786</web_service_definition>
+        <web_service_version/>
+    </sys_ws_operation>
+</record_update>

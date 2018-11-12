@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update table="sys_ws_operation">
+    <sys_ws_operation action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <consumes>application/json,application/x-www-form-urlencoded</consumes>
+        <consumes_customized>true</consumes_customized>
+        <default_operation_uri/>
+        <enforce_acl>cf9d01d3e73003009d6247e603f6a990</enforce_acl>
+        <http_method>POST</http_method>
+        <name>Interactive Messages</name>
+        <operation_script><![CDATA[(function process(/*RESTAPIRequest*/ request, /*RESTAPIResponse*/ response) {
+	
+
+	// We have to check if it's a message_action vs an interactive_message payload
+	//   because message_action is not an array
+	
+	var payloadStr = '';
+	var payloadObj = {};
+	var type = '';
+	
+	// The payload for an interactive button is in the queryParams of the request
+	// The queryParams actually has two object arrays, so...
+	var jsonStr = JSON.stringify(request.queryParams);
+	
+	// Separate the objects
+	var parser = new JSONParser();
+	var parsed = parser.parse(jsonStr);
+	payloadStr = parsed.payload[0];
+	payloadObj = parser.parse(payloadStr);
+	
+	if (payloadObj.type == 'message_action'){
+		type = 'msg_action';
+	} else {
+		type = 'active_msg';
+	}
+	gs.log('---> Slack Integration Payload: ' + payloadStr, 'Slack Button');
+	gs.log('---> Slack Integration Type: ' + type, 'Slack Button');
+	
+	// Always send back a successful 200 response and handle error notifications in message
+	response.setStatus(200);
+	
+	// Validate the Slack app token
+	var authtoken = gs.getProperty("itom.slack.app.token01");
+	if(payloadObj.token != authtoken) {
+		return 'Unauthorized Request';
+	}
+	
+	try {
+		var respText = "Your Request is being processed...";
+		// Format an initial response
+		var payload = {
+			"response_type": "ephemeral",
+			"replace_original": false,
+			"text": respText
+		};
+		
+		// Send ephemeral response back to Slack to notify user command is processing
+		
+		var slackResponse = new sn_ws.RESTMessageV2();
+		slackResponse.setEndpoint(payloadObj.response_url);
+		slackResponse.setHttpMethod('POST');
+		slackResponse.setRequestBody(JSON.stringify(payload));
+		slackResponse.setRequestHeader('Content-type','application/json');
+		var slackOutput = slackResponse.execute();
+		
+		// Create an equivalent object as that processed for slash commands
+		// The title should have the alert number to query / lookup
+		var alertData = {};
+		var alertJSON;
+		var action = '';
+		alertData.user_id = payloadObj.user.id;
+		alertData.response_url = payloadObj.response_url;
+		
+		if(type == 'msg_action'){
+			action = payloadObj.callback_id+'';
+		} else {
+			action = payloadObj.actions[0].name+'';
+		}
+		gs.log('---> Slack Integration Action: ' + action, 'Slack Button');
+		
+		switch (action) {
+			// Payload from a standard message button
+			case 'getdata':
+				alertData.action = payloadObj.actions[0].value+'';
+				alertData.text = 'alert:' + payloadObj.original_message.attachments[0].title;
+				alertJSON = JSON.stringify(alertData);
+				gs.eventQueue("itom.slack.getdata", current, alertJSON);
+				break;
+			// Payload from a message action
+			case 'alert_list':
+				alertData.text = 'listopen';
+				alertJSON = JSON.stringify(alertData);
+				gs.eventQueue("itom.slack.getdata", current, alertJSON);
+				break;
+			// Payload from a drop-down menu
+			case 'remediation_list':
+				alertData.action = payloadObj.actions[0].selected_options[0].value;
+				alertData.text = 'action:' + alertData.action + ' alert:' + payloadObj.original_message.attachments[0].title;
+				alertJSON = JSON.stringify(alertData);
+				gs.eventQueue("itom.slack.action", current, alertJSON);
+				break;
+			default:
+				gs.log('---> Slack Integration: No valid action selected: ' + action, 'Slack Button');
+				break;
+		}
+		
+		return;
+	}
+	catch (e){
+		gs.log('---> Slack Integration error in slack button REST API: ' + e, 'Slack Button');
+		response.setBody('Error in processing: ' + e);
+		return;
+	}
+	
+})(request, response);]]></operation_script>
+        <operation_uri>/api/x_111982_slack_int/itom_slack_messages</operation_uri>
+        <produces>application/json</produces>
+        <produces_customized>true</produces_customized>
+        <relative_path>/</relative_path>
+        <request_example/>
+        <requires_acl_authorization>true</requires_acl_authorization>
+        <requires_authentication>false</requires_authentication>
+        <short_description/>
+        <sys_class_name>sys_ws_operation</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2018-11-12 15:31:48</sys_created_on>
+        <sys_customer_update>false</sys_customer_update>
+        <sys_id>3a1b61204f712300e8ef4ea18110c7b0</sys_id>
+        <sys_mod_count>0</sys_mod_count>
+        <sys_name>Interactive Messages</sys_name>
+        <sys_package display_value="Slack Integration - ITOM APIs" source="x_111982_slack_int">c26529a04f312300e8ef4ea18110c725</sys_package>
+        <sys_policy/>
+        <sys_replace_on_upgrade>false</sys_replace_on_upgrade>
+        <sys_scope display_value="Slack Integration - ITOM APIs">c26529a04f312300e8ef4ea18110c725</sys_scope>
+        <sys_update_name>sys_ws_operation_3a1b61204f712300e8ef4ea18110c7b0</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2018-11-12 15:31:48</sys_updated_on>
+        <web_service_definition display_value="ITOM Slack - Messages">24faad6c4f312300e8ef4ea18110c732</web_service_definition>
+        <web_service_version/>
+    </sys_ws_operation>
+</record_update>

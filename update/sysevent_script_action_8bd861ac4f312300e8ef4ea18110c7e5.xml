@@ -1,0 +1,238 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record_update sys_domain="global" table="sysevent_script_action">
+    <sysevent_script_action action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <condition_script/>
+        <description/>
+        <event_name>x_111982_slack_int.itom.slack.action</event_name>
+        <name>ITOM Slack Remediation Action</name>
+        <order>100</order>
+        <script><![CDATA[alertAction();
+
+function alertAction () {
+	
+	try{
+		// initialize variables
+		var respType = '';
+		var respMsg = '';
+		var parm0Array = [];
+		var parser = new JSONParser();
+		var parsed = parser.parse(event.parm1);
+		
+		var cmdParams = parsed.text;
+		//gs.log('--> Slack parm1: ' + event.parm1, 'Slack ITOM Action');
+		//gs.log('--> Slack response url: ' + parsed.response_url, 'Slack ITOM Action');
+		
+		// validate parameter existence and format
+		var re0 = new RegExp('^(action:).*(alert:).*$', 'j');
+		parm0Array = re0.exec(cmdParams);
+		
+		if (cmdParams == 'help'){
+			respMsg = showHelp();
+			respType = 'ephemeral';
+		} else if ((parm0Array[1] != 'action:') || (parm0Array[2] != 'alert:')){
+			respMsg = showHelp();
+			respType = 'ephemeral';
+		} else {
+			respMsg = executeAction(parsed.user_id, cmdParams);
+			respType = 'in_channel';
+		}
+		
+		// Build Slack specific payload
+		var payload = {
+			"response_type": respType,
+			"replace_original": false,
+			"attachments": [
+					{
+						"text": respMsg
+					}
+			]
+		};
+		
+		var slackResponse = new sn_ws.RESTMessageV2();
+		slackResponse.setEndpoint(parsed.response_url);
+		slackResponse.setHttpMethod('POST');
+		slackResponse.setRequestBody(JSON.stringify(payload));
+		slackResponse.setRequestHeader('Content-type','application/json');
+		var slackOutput = slackResponse.execute();
+		var status = slackOutput.getStatusCode();
+		//gs.log('--> Slack output: ' + status + ': ' + slackOutput.getBody(), 'Slack ITOM Action');
+	}
+	catch (e) {
+		gs.log('---> Slack Integration error in alertAction: ' + e, 'Slack ITOM Action');
+	}
+}
+
+/*
+ * This function builds a string showing proper usage of the /actnow slash
+ *    command that would initiate a call to these functions
+ */
+function executeAction(userID, parms){
+	var parmAction = '';
+	var parmAlert = '';
+	var returnMsg = '';
+	
+	try {
+		// parse command parameters... setup Regular Expressions to pull out the data
+		// The double slash on re1 before the 's' is to escape the \s
+		var re1 = new RegExp('(?<=action:).*?(?=\\s)', 'j');
+		var re2 = new RegExp('(?<=alert:).*', 'j');
+		
+		// Extract the action to perform
+		var parm1Array = re1.exec(parms);
+		parmAction = parm1Array[0];
+		
+		// Extract the alert against which to perform the action
+		var parm2Array = re2.exec(parms);
+		parmAlert = parm2Array[0];
+		
+		//gs.log('--> Slack action: ' + parmAction, 'Slack Alert App');
+		//gs.log('--> Slack alert: ' + parmAlert, 'Slack Alert App');
+		
+		// Find Alert record
+		var alGr= new GlideRecord('em_alert');
+		alGr.addQuery('number', parmAlert);
+		alGr.query();
+		
+		if (alGr.next()) {
+			
+			// Based on CI class, you must know which remediation options are applicable... for now
+			var ciGr = new GlideRecord('cmdb_ci');
+			ciGr.addQuery('sys_id', alGr.cmdb_ci);
+			ciGr.query();
+			var workflowID = parmAction + '';
+			
+			if(ciGr.next()){
+				
+				// If a valid workflow was found, then create the em_remediation_task to execute
+				if (workflowID != '') {
+					var emGr = new GlideRecord('em_remediation_task');
+					emGr.initialize();
+					emGr.alert = alGr.sys_id;
+					emGr.cmdb_ci = alGr.cmdb_ci;
+					emGr.approval = 'approved';
+					emGr.impact = 3;
+					emGr.knowledge = 'false';
+					emGr.priority = 4;
+					emGr.remediation_workflow = workflowID;
+					emGr.run_remediation = 'true';
+					emGr.state = 1;
+					emGr.upon_approval = 'proceed';
+					emGr.urgency = 3;
+					emGr.insert();
+					
+					returnMsg = getRemediationOutput(emGr.sys_id, parmAction, emGr.number, userID);
+				} else {
+					returnMsg = '\nAction: ' + parmAction + ' does not have an associated orchestration workflow.\n';
+				}
+			} else {
+				returnMsg = '\nNo CI on Alert found to remediate.\n';
+			}
+		} else {
+			returnMsg = '\nAlert: ' + parmAlert + ' not found upon which to take action.\n';
+		}
+	}
+	catch (e){
+		gs.log('---> Slack Integration error in executeAction: ' + e, 'Slack ITOM Action');
+	}
+	return returnMsg;
+}
+
+/*
+ * This function will wait for the remediation task to complete and retrieve the output that is placed
+ *    into an attachment called remediationoutput.txt
+ *
+ * The return value will be the message to return to Slack
+ */
+function getRemediationOutput(tasksysID, action, taskNbr, userID){
+	
+	var taskOutput = '';
+	var thisInstanceName = gs.getProperty("instance_name");
+	var taskLink = 'https://' + thisInstanceName + '.service-now.com/em_remediation_task.do?sys_id=';
+	var link2task = '';
+	
+	// Loop and sleep while the remediation task completes
+	var progress = queryRemediationTask(tasksysID);
+	while (progress == 'not complete'){
+		gs.sleep(3000);
+		progress = queryRemediationTask(tasksysID);
+	}
+	
+	try {
+		// This looks crazy, but it's how to get the data from the attachment on the remediation task
+		var attGr = new GlideRecord('em_remediation_task');
+		attGr.get(tasksysID);
+		
+		var attDoc = new GlideSysAttachment();
+		var remOutput = attDoc.get(attGr, 'remediationoutput');
+		
+		// Build response to send back to Slack
+		link2task = taskLink + tasksysID;
+		taskOutput = '\n<@' + userID + '> Request for Action: ' + action + ' executed on alert via ' + '<' + link2task + '|' + taskNbr + '>\n';
+		taskOutput = taskOutput + remOutput;
+	}
+	catch (e) {
+		gs.log('---> Slack Integration error in remediation output: ' + e, 'Slack ITOM Action');
+		taskOutput = 'Error processing';
+	}
+	
+	return taskOutput;
+}
+
+/*
+ * This function evaluates the status of the remediation task and returns a status
+ *    return values will be either 'not complete' or 'complete'
+ */
+function queryRemediationTask(tasksysID){
+	var progress = 'complete';
+	
+	try{
+		var taskGr = new GlideRecord('em_remediation_task');
+		taskGr.addQuery('sys_id', tasksysID);
+		taskGr.query();
+	
+		if(taskGr.next()){
+			if (taskGr.state != 3 && taskGr.state != 4){
+				progress = 'not complete';
+			}
+		}
+	}
+	catch(e){
+		gs.log('---> Slack Integration error in queryRemediationTask: ' + e, 'Slack ITOM Action');
+	}
+	return progress;
+}
+
+/*
+ * This function builds a string showing proper usage of the /actnow slash
+ *    command that would initiate a call to these functions
+ */
+function showHelp(){
+	var helpText = 'Valid options for this command are:\n' +
+	'/actnow action:<action> alert:<alert>\n' +
+	'/actnow help\n\n' +
+	'Valid actions are:\n\n' +
+	'getlog for an Apache CI\n' +
+	'runtop for any CI\n';
+	return helpText;
+}]]></script>
+        <synchronous>false</synchronous>
+        <sys_class_name>sysevent_script_action</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2018-11-12 15:22:01</sys_created_on>
+        <sys_customer_update>false</sys_customer_update>
+        <sys_domain>global</sys_domain>
+        <sys_domain_path>/</sys_domain_path>
+        <sys_id>8bd861ac4f312300e8ef4ea18110c7e5</sys_id>
+        <sys_mod_count>1</sys_mod_count>
+        <sys_name>ITOM Slack Remediation Action</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="Slack Integration - ITOM APIs" source="x_111982_slack_int">c26529a04f312300e8ef4ea18110c725</sys_package>
+        <sys_policy/>
+        <sys_replace_on_upgrade>false</sys_replace_on_upgrade>
+        <sys_scope display_value="Slack Integration - ITOM APIs">c26529a04f312300e8ef4ea18110c725</sys_scope>
+        <sys_update_name>sysevent_script_action_8bd861ac4f312300e8ef4ea18110c7e5</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2018-11-12 15:22:08</sys_updated_on>
+    </sysevent_script_action>
+</record_update>
